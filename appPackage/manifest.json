@@ -1,0 +1,70 @@
+{
+    "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.24/MicrosoftTeams.schema.json",
+    "manifestVersion": "1.24",
+    "version": "1.1.0",
+    "id": "${{TEAMS_APP_ID}}",
+    "developer": {
+        "name": "Goodyear Rubber Company",
+        "websiteUrl": "https://www.goodyearrubber.com",
+        "privacyUrl": "https://www.goodyearrubber.com/privacy",
+        "termsOfUseUrl": "https://www.goodyearrubber.com/termofuse"
+    },
+    "icons": {
+        "color": "color.png",
+        "outline": "outline.png"
+    },
+    "name": {
+        "short": "Goodyear Operator",
+        "full": "Goodyear Operator AI Agent"
+    },
+    "description": {
+        "short": "Goodyear's AI Agent",
+        "full": "Goodyear Operator is an AI Agent that helps you with any inquiries related to Goodyear Rubber customer orders, customers, shipments, etc. directly from Micosoft Teams."
+    },
+    "accentColor": "#FFFFFF",
+    "bots": [
+        {
+            "botId": "${{BOT_ID}}",
+            "scopes": [
+                "team",
+                "groupChat",
+                "personal"
+            ],
+            "supportsFiles": false,
+            "isNotificationOnly": false,
+            "commandLists": [
+                {
+                    "scopes": [
+                        "personal"
+                    ],
+                    "commands": [
+                        {
+                            "title": "Check Order Status",
+                            "description": "Find open backorders and promised dates for a customer."
+                        },
+                        {
+                            "title": "Lookup Shipment History",
+                            "description": "Search for past completed shipments and invoice details."
+                        },
+                        {
+                            "title": "Price & Part Check",
+                            "description": "Find the last price paid or specific part details."
+                        },
+                        {
+                            "title": "Summarize Account",
+                            "description": "Get a high-level summary of open vs. shipped orders for a customer."
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "composeExtensions": [],
+    "configurableTabs": [],
+    "staticTabs": [],
+    "permissions": [
+        "identity",
+        "messageTeamMembers"
+    ],
+    "validDomains": []
+}
