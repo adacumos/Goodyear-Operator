@@ -1,10 +1,9 @@
 from dataclasses import dataclass
 from typing import Optional, List
-from azure.search.documents.models import VectorizedQuery
+from azure.search.documents.models import QueryType, VectorizedQuery
 from openai import AsyncAzureOpenAI
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
-import json
 
 from config import Config
 
@@ -52,11 +51,11 @@ class AzureAISearchDataSource():
         # 1. Generate the embedding for the user's question
         embedding = await get_embedding_vector(query)
         
-        # 2. Setup the Vector Query
-        # 'text_vector' matches the field name in your screenshot 2025-12-29 at 2.19.19 PM
+        # 2. Setup the Vector Query   
+        # UPDATE: Increase k_nearest_neighbors to 20 (matches Playground "Top K")     
         vector_query = VectorizedQuery(
             vector=embedding, 
-            k_nearest_neighbors=5,
+            k_nearest_neighbors=20,
             fields="text_vector"
         )
 
@@ -80,7 +79,10 @@ class AzureAISearchDataSource():
             search_text=query,
             select=selectedFields,
             vector_queries=[vector_query],
-            top=5
+            # Matches Playground "Document Count"
+            top=20,
+            query_type=QueryType.SEMANTIC,
+            semantic_configuration_name="rag-1767122801280-semantic-configuration"
         )
 
         if not searchResults:
