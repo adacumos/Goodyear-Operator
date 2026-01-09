@@ -1,22 +1,20 @@
 import asyncio
-# import json
 import os
 
 from azure.identity import ManagedIdentityCredential
-# UPDATED IMPORTS: Changed 'microsoft.teams' to 'microsoft_teams'
 from microsoft_teams.ai import ChatPrompt, ListMemory
 from microsoft_teams.ai.ai_model import AIModel
 from microsoft_teams.apps import App, ActivityContext
-from microsoft_teams.openai import OpenAICompletionsAIModel
-from microsoft_teams.api import MessageActivity, MessageActivityInput, MessageSubmitActionInvokeActivity # CitationAppearance
+from microsoft_teams.api import MessageActivity, MessageActivityInput, MessageSubmitActionInvokeActivity
 
 from config import Config
 from azure_ai_search_data_source import AzureAISearchDataSource, AzureAISearchDataSourceOptions
+# Import our custom model
+from custom_ai_model import create_model_from_config
 
 config = Config()
 
 # Create Azure AI Search options
-# ENSURE THIS MATCHES YOUR NEW INDEX NAME FROM THE SCREENSHOT
 search_options = AzureAISearchDataSourceOptions(
     name="goodyear-agent-search",
     indexName="rag-1767122801280", 
@@ -52,12 +50,29 @@ app = App(
     token=create_token_factory() if config.APP_TYPE == "UserAssignedMsi" else None
 )
 
-model = OpenAICompletionsAIModel(
-    key=config.AZURE_OPENAI_API_KEY,
-    model=config.AZURE_OPENAI_MODEL_DEPLOYMENT_NAME,
-    azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
-    api_version="2024-12-01-preview"
+# ===================================================================
+# UPDATED: Create model with custom parameters
+# ===================================================================
+# For a corporate assistant that needs to be precise and factual:
+# - Lower temperature (0.3) = More focused, deterministic responses
+# - Higher max_tokens (2000) = Allows for detailed explanations
+# - Lower frequency_penalty = Acceptable repetition for clarity
+
+model = create_model_from_config(
+    temperature=0.5,           # Low temperature for factual, precise responses
+    max_tokens=2000,           # Allow detailed responses with tables
+    top_p=0.9,                 # Slightly focused sampling
+    frequency_penalty=0.2,     # Minimal penalty to avoid awkward phrasing
+    presence_penalty=0.1       # Slight encouragement for topic variety
 )
+
+# You can also update parameters dynamically if needed:
+# model.update_parameters(temperature=0.5, max_tokens=1500)
+
+# Or check current parameters:
+# print(f"Current model parameters: {model.get_parameters()}")
+# ===================================================================
+
 
 conversation_store: dict[str, ListMemory] = {}
 
