@@ -59,7 +59,6 @@ model = OpenAICompletionsAIModel(
     api_version="2024-12-01-preview"
 )
 
-
 conversation_store: dict[str, ListMemory] = {}
 
 def get_or_create_conversation_memory(conversation_id: str) -> ListMemory:
