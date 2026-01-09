@@ -51,11 +51,10 @@ class AzureAISearchDataSource():
         # 1. Generate the embedding for the user's question
         embedding = await get_embedding_vector(query)
         
-        # 2. Setup the Vector Query   
-        # UPDATE: Increase k_nearest_neighbors to 20 (matches Playground "Top K")     
+        # 2. Setup the Vector Query             
         vector_query = VectorizedQuery(
             vector=embedding, 
-            k_nearest_neighbors=20,
+            k_nearest_neighbors=50,
             fields="text_vector"
         )
 
@@ -78,8 +77,7 @@ class AzureAISearchDataSource():
         searchResults = self.searchClient.search(
             search_text=query,
             select=selectedFields,
-            vector_queries=[vector_query],
-            # Matches Playground "Document Count"
+            vector_queries=[vector_query],            
             top=20,
             query_type=QueryType.SEMANTIC,
             semantic_configuration_name="rag-1767122801280-semantic-configuration"
