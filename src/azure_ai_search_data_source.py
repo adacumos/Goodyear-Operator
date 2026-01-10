@@ -80,7 +80,7 @@ class AzureAISearchDataSource():
             vector_queries=[vector_query],            
             top=20,
             query_type=QueryType.SEMANTIC,
-            semantic_configuration_name="rag-1767122801280-semantic-configuration"
+            semantic_configuration_name="rag-1768021240909-semantic-configuration"
         )
 
         if not searchResults:
