@@ -17,7 +17,7 @@ config = Config()
 # Create Azure AI Search options
 search_options = AzureAISearchDataSourceOptions(
     name="goodyear-agent-search",
-    indexName="rag-1767122801280", 
+    indexName="rag-1768021240909", 
     azureAISearchApiKey=config.AZURE_SEARCH_KEY,
     azureAISearchEndpoint=config.AZURE_SEARCH_ENDPOINT
 )
@@ -59,8 +59,8 @@ app = App(
 # - Lower frequency_penalty = Acceptable repetition for clarity
 
 model = create_model_from_config(
-    temperature=0.5,           # Low temperature for factual, precise responses
-    max_tokens=2000,           # Allow detailed responses with tables
+    temperature=0.3,           # Low temperature for factual, precise responses
+    max_tokens=2500,           # Allow detailed responses with tables
     top_p=0.9,                 # Slightly focused sampling
     frequency_penalty=0.2,     # Minimal penalty to avoid awkward phrasing
     presence_penalty=0.1       # Slight encouragement for topic variety
