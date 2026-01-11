@@ -118,14 +118,14 @@ class AzureAISearchDataSource:
         }
         
         # Detect record type preferences (for post-filtering and logging)
-        if any(word in query_lower for word in ["open", "backorder", "pending", "status", "backlog"]):
+        if any(word in query_lower for word in ["open", "backorder", "pending", "status", "backlog", "on-going"]):
             intent["record_types"].append("OpenOrder")
             intent["is_status_check"] = True
         
-        if any(word in query_lower for word in ["ship", "track", "deliver", "shipment", "delivery"]):
+        if any(word in query_lower for word in ["ship", "track", "deliver", "shipment", "delivery", "shipped", "fulfillment"]):
             intent["record_types"].append("ShipmentLine")
         
-        if any(word in query_lower for word in ["history", "past", "previous", "last", "closed"]):
+        if any(word in query_lower for word in ["history", "past", "previous", "last", "closed", "historical", "old"]):
             intent["record_types"].append("History")
         
         # Detect count queries
@@ -215,7 +215,7 @@ class AzureAISearchDataSource:
                 'vector_queries': [vector_query],
                 'top': self.options.top_k * 2,  # Get more results for post-filtering
                 'query_type': QueryType.SEMANTIC,
-                'semantic_configuration_name': "rag-1768021240909-semantic-configuration"
+                'semantic_configuration_name': "rag-1767122801281-semantic-configuration"
             }
             
             logger.info(f"Executing search without OData filter (RecordType not filterable)")

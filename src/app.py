@@ -1,6 +1,6 @@
 """
-Improved App with Better Memory Management and Error Handling
-Save this file as: app.py (replace your existing app.py)
+Enhanced App with Analytics and Forecasting Capabilities
+Replace your existing app.py with this version
 """
 
 import asyncio
@@ -17,6 +17,7 @@ from microsoft_teams.api import MessageActivity, MessageActivityInput, MessageSu
 from config import Config
 from azure_ai_search_data_source import AzureAISearchDataSource, AzureAISearchDataSourceOptions
 from custom_ai_model import create_model_from_config
+from analytics_helper import create_analytics_context, ManufacturingAnalytics
 
 # Configure logging
 logging.basicConfig(
@@ -30,7 +31,7 @@ config = Config()
 # Create Azure AI Search options with optimized parameters
 search_options = AzureAISearchDataSourceOptions(
     name="goodyear-agent-search",
-    indexName="rag-1768021240909", 
+    indexName="rag-1767122801281", 
     azureAISearchApiKey=config.AZURE_SEARCH_KEY,
     azureAISearchEndpoint=config.AZURE_SEARCH_ENDPOINT,
     top_k=15,      # Reduced for better precision
@@ -53,7 +54,7 @@ def load_instructions() -> str:
 
 INSTRUCTIONS = load_instructions()
 
-# Enhanced system message for gpt-4o-mini
+# Enhanced system message for gpt-4o-mini with analytics focus
 SYSTEM_ENHANCEMENT = """
 
 CRITICAL RESPONSE RULES FOR GPT-4O-MINI:
@@ -63,6 +64,14 @@ CRITICAL RESPONSE RULES FOR GPT-4O-MINI:
 4. For "how many" questions, count UNIQUE order numbers, not line items
 5. Use tables for multi-item responses
 6. If search returns no results, say "No records found" - do NOT make up data
+
+ANALYTICAL INTELLIGENCE RULES:
+7. When asked about trends, forecasts, or patterns: ANALYZE the data, don't just report it
+8. ALWAYS provide confidence levels for forecasts (HIGH/MEDIUM/LOW)
+9. Include specific numbers and calculations in analytical responses
+10. Provide ACTIONABLE recommendations based on data insights
+11. Use the Analytical Summary (if provided) to enhance your responses
+12. Think like a manufacturing analyst: consider seasonality, capacity, customer patterns
 """
 
 
@@ -80,15 +89,14 @@ app = App(
     token=create_token_factory() if config.APP_TYPE == "UserAssignedMsi" else None
 )
 
-# Create optimized model for corporate assistant
-# Lower temperature (0.2) for more factual, deterministic responses
-# Increased max_tokens (3000) for detailed tables and summaries
+# Create optimized model for corporate assistant with analytics
+# Lower temperature (0.2) for factual responses, but allow some creativity for insights
 model = create_model_from_config(
-    temperature=0.2,           # Very low for maximum accuracy
-    max_tokens=3000,           # Higher for detailed responses
+    temperature=0.3,           # Slightly higher for analytical reasoning
+    max_tokens=4000,           # Higher for detailed analytical responses
     top_p=0.9,                 # Focused sampling
     frequency_penalty=0.3,     # Reduce repetition
-    presence_penalty=0.1       # Slight topic variety
+    presence_penalty=0.2       # Encourage diverse analytical perspectives
 )
 
 logger.info(f"Model initialized with parameters: {model.get_parameters()}")
@@ -113,26 +121,35 @@ def get_or_create_conversation_memory(conversation_id: str) -> ListMemory:
         logger.info(f"Creating new conversation memory: {conversation_id}")
         conversation_store[conversation_id] = ListMemory()
     
-    memory = conversation_store[conversation_id]
-    
-    # Limit memory size to prevent token overflow
-    # Each turn = user message + assistant response = 2 messages
-    max_messages = MAX_CONVERSATION_TURNS * 2
-    
-    # Get current messages (this is a workaround since ListMemory doesn't expose count)
-    # We'll track this in a more robust way
-    
-    return memory
+    return conversation_store[conversation_id]
 
 
-def cleanup_old_conversations():
+def detect_analytical_query(query: str) -> bool:
     """
-    Cleanup conversations older than 1 hour (optional background task)
-    This is a simple implementation - in production, use a proper TTL cache
+    Detect if query requires analytical/forecasting response
+    
+    Args:
+        query: User's query text
+    
+    Returns:
+        True if query is analytical in nature
     """
-    # This would require timestamp tracking - simplified for now
-    # In production: use redis with TTL or implement proper cache eviction
-    pass
+    analytical_keywords = [
+        'forecast', 'predict', 'trend', 'pattern', 'analyze', 'analysis',
+        'growth', 'decline', 'increase', 'decrease', 'compare', 'comparison',
+        'revenue', 'sales', 'performance', 'metric', 'average', 'total',
+        'should i', 'recommend', 'suggest', 'prioritize', 'focus',
+        'next month', 'next quarter', 'next year', 'last month', 'last quarter',
+        'how much', 'how many', 'what if', 'expect', 'projection'
+    ]
+    
+    query_lower = query.lower()
+    is_analytical = any(keyword in query_lower for keyword in analytical_keywords)
+    
+    if is_analytical:
+        logger.info(f"Detected analytical query: {query[:50]}...")
+    
+    return is_analytical
 
 
 async def validate_response(response: str, query: str) -> Dict[str, any]:
@@ -151,7 +168,8 @@ async def validate_response(response: str, query: str) -> Dict[str, any]:
         'has_units': any(unit in response for unit in ['FT', 'LB', 'EA', 'GAL']),
         'has_no_data_claim': 'No records found' in response or 'no open orders' in response.lower(),
         'is_too_short': len(response.split()) < 10,
-        'mentions_making_up_data': 'I cannot' in response or "I don't have" in response
+        'mentions_making_up_data': 'I cannot' in response or "I don't have" in response,
+        'is_analytical': detect_analytical_query(query)
     }
     
     # Check if query asks for count
@@ -159,6 +177,12 @@ async def validate_response(response: str, query: str) -> Dict[str, any]:
     
     if is_count_query:
         validation['has_count'] = any(char.isdigit() for char in response)
+    
+    # Additional checks for analytical queries
+    if validation['is_analytical']:
+        validation['has_numbers'] = any(char.isdigit() for char in response)
+        validation['has_recommendations'] = 'recommend' in response.lower() or 'suggest' in response.lower()
+        validation['has_confidence'] = any(conf in response.lower() for conf in ['high confidence', 'medium confidence', 'low confidence'])
     
     return validation
 
@@ -168,7 +192,7 @@ async def handle_stateful_conversation(
     ctx: ActivityContext[MessageActivity]
 ) -> None:
     """
-    Enhanced conversation handler with validation and error recovery
+    Enhanced conversation handler with analytics and forecasting
     
     Args:
         model: AI model instance
@@ -185,8 +209,8 @@ async def handle_stateful_conversation(
         input_text = ctx.activity.strip_mentions_text().text
         logger.info(f"User query: {input_text}")
         
-        # Send typing indicator for better UX
-        # await ctx.send_typing_indicator()  # If available in your SDK
+        # Detect if this is an analytical query
+        is_analytical = detect_analytical_query(input_text)
         
         # Step 1: Retrieve RAG data with error handling
         try:
@@ -201,7 +225,7 @@ async def handle_stateful_conversation(
             )
             return
         
-        # Step 2: Build enhanced prompt
+        # Step 2: Build enhanced prompt with analytics context
         enhanced_instructions = INSTRUCTIONS + SYSTEM_ENHANCEMENT
         
         # Add metadata context if available
@@ -211,9 +235,24 @@ async def handle_stateful_conversation(
             if meta.get('unique_orders', 0) > 0:
                 metadata_context = f"\n\nSEARCH METADATA: Found {meta['unique_orders']} unique orders in {meta['unique_chunks']} records."
         
-        full_context = f"{enhanced_instructions}\n\nAdditional Context from Search:{metadata_context}\n{data_context.output}"
+        # Step 3: Generate analytics context if this is an analytical query
+        analytics_context = ""
+        if is_analytical and data_context.output:
+            try:
+                analytics_context = create_analytics_context(data_context.output)
+                logger.info("Generated analytics context for analytical query")
+            except Exception as e:
+                logger.error(f"Analytics context generation failed: {e}")
         
-        # Step 3: Create chat prompt and send to AI
+        # Combine all context
+        full_context = (
+            f"{enhanced_instructions}"
+            f"{metadata_context}"
+            f"{analytics_context}"
+            f"\n\nAdditional Context from Search:\n{data_context.output}"
+        )
+        
+        # Step 4: Create chat prompt and send to AI
         chat_prompt = ChatPrompt(model)
         
         try:
@@ -231,14 +270,25 @@ async def handle_stateful_conversation(
             )
             return
         
-        # Step 4: Validate response
+        # Step 5: Validate response
         response_text = chat_result.response.content
         validation = await validate_response(response_text, input_text)
         
         # Log validation results
         logger.info(f"Response validation: {validation}")
         
-        # Step 5: Send response with feedback
+        # Optional: Add warning if analytical query lacks key elements
+        if validation['is_analytical']:
+            missing_elements = []
+            if not validation.get('has_numbers'):
+                missing_elements.append("specific numbers")
+            if not validation.get('has_recommendations'):
+                missing_elements.append("recommendations")
+            
+            if missing_elements:
+                logger.warning(f"Analytical response missing: {', '.join(missing_elements)}")
+        
+        # Step 6: Send response with feedback
         await ctx.send(
             MessageActivityInput(text=response_text)
             .add_ai_generated()
@@ -283,12 +333,10 @@ async def handle_message_feedback(ctx: ActivityContext[MessageSubmitActionInvoke
     logger.info(f"User feedback received: {feedback_value}")
     
     # In production, store this in a database for analysis
-    # Example: await store_feedback(conversation_id, message_id, feedback_value)
-    
-    # Optional: Send acknowledgment
-    # await ctx.send(MessageActivityInput(text="Thank you for your feedback!"))
+    # Especially important for analytical queries to improve forecasting accuracy
+    # Example: await store_feedback(conversation_id, message_id, feedback_value, is_analytical=True)
 
 
 if __name__ == "__main__":
-    logger.info("Starting Goodyear AI Assistant...")
+    logger.info("Starting Goodyear AI Assistant with Analytics...")
     asyncio.run(app.start())
