@@ -31,7 +31,7 @@ config = Config()
 # Create Azure AI Search options with optimized parameters
 search_options = AzureAISearchDataSourceOptions(
     name="goodyear-agent-search",
-    indexName="rag-1767122801281", 
+    indexName="rag-1768021240909", 
     azureAISearchApiKey=config.AZURE_SEARCH_KEY,
     azureAISearchEndpoint=config.AZURE_SEARCH_ENDPOINT,
     top_k=15,      # Reduced for better precision

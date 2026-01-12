@@ -215,7 +215,7 @@ class AzureAISearchDataSource:
                 'vector_queries': [vector_query],
                 'top': self.options.top_k * 2,  # Get more results for post-filtering
                 'query_type': QueryType.SEMANTIC,
-                'semantic_configuration_name': "rag-1767122801281-semantic-configuration"
+                'semantic_configuration_name': "rag-1768021240909-semantic-configuration"
             }
             
             logger.info(f"Executing search without OData filter (RecordType not filterable)")
