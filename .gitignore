@@ -6,6 +6,9 @@ env/.env.playground
 .env
 appPackage/build/*.zip
 
+#temps
+tmp/*.*
+
 # python virtual environment
 .venv/
 __pycache__/

@@ -1,6 +1,6 @@
 """
-Improved App with Better Memory Management and Error Handling
-Save this file as: app.py (replace your existing app.py)
+Enhanced App with Analytics and Forecasting Capabilities
+Simplified version with clearer logic flow
 """
 
 import asyncio
@@ -17,6 +17,7 @@ from microsoft_teams.api import MessageActivity, MessageActivityInput, MessageSu
 from config import Config
 from azure_ai_search_data_source import AzureAISearchDataSource, AzureAISearchDataSourceOptions
 from custom_ai_model import create_model_from_config
+from analytics_helper import create_analytics_context
 
 # Configure logging
 logging.basicConfig(
@@ -27,19 +28,19 @@ logger = logging.getLogger(__name__)
 
 config = Config()
 
-# Create Azure AI Search options with optimized parameters
+# Create Azure AI Search with optimized parameters
 search_options = AzureAISearchDataSourceOptions(
     name="goodyear-agent-search",
-    indexName="rag-1768021240909", 
+    indexName="rag-1767122801281", 
     azureAISearchApiKey=config.AZURE_SEARCH_KEY,
     azureAISearchEndpoint=config.AZURE_SEARCH_ENDPOINT,
-    top_k=15,      # Reduced for better precision
-    vector_k=30    # Aligned with actual usage
+    top_k=15,
+    vector_k=35
 )
 
 azure_ai_search = AzureAISearchDataSource(search_options)
 
-# Load instructions from file
+
 def load_instructions() -> str:
     """Load instructions from instructions.txt file"""
     try:
@@ -53,16 +54,24 @@ def load_instructions() -> str:
 
 INSTRUCTIONS = load_instructions()
 
-# Enhanced system message for gpt-4o-mini
+# System enhancement for GPT-4o-mini with clear rules
 SYSTEM_ENHANCEMENT = """
 
-CRITICAL RESPONSE RULES FOR GPT-4O-MINI:
+CRITICAL RESPONSE RULES:
 1. ALWAYS cite specific Order Numbers when providing information
 2. ALWAYS include Units of Measure (UM) with quantities
 3. When multiple line items share an order number, present them as ONE order with multiple items
 4. For "how many" questions, count UNIQUE order numbers, not line items
 5. Use tables for multi-item responses
 6. If search returns no results, say "No records found" - do NOT make up data
+
+ANALYTICAL INTELLIGENCE RULES:
+7. When asked about trends, forecasts, or patterns: ANALYZE the data, don't just report it
+8. ALWAYS provide confidence levels for forecasts (HIGH/MEDIUM/LOW)
+9. Include specific numbers and calculations in analytical responses
+10. Provide ACTIONABLE recommendations based on data insights
+11. Use the Analytical Summary (if provided) to enhance your responses
+12. Think like a manufacturing analyst: consider seasonality, capacity, customer patterns
 """
 
 
@@ -80,28 +89,25 @@ app = App(
     token=create_token_factory() if config.APP_TYPE == "UserAssignedMsi" else None
 )
 
-# Create optimized model for corporate assistant
-# Lower temperature (0.2) for more factual, deterministic responses
-# Increased max_tokens (3000) for detailed tables and summaries
+# Create optimized model for analytical responses
 model = create_model_from_config(
-    temperature=0.2,           # Very low for maximum accuracy
-    max_tokens=3000,           # Higher for detailed responses
-    top_p=0.9,                 # Focused sampling
-    frequency_penalty=0.3,     # Reduce repetition
-    presence_penalty=0.1       # Slight topic variety
+    temperature=0.3,
+    max_tokens=4000,
+    top_p=0.9,
+    frequency_penalty=0.3,
+    presence_penalty=0.2
 )
 
-logger.info(f"Model initialized with parameters: {model.get_parameters()}")
+logger.info(f"Model initialized: {model.get_parameters()}")
 
-
-# Memory management with size limits
-MAX_CONVERSATION_TURNS = 10  # Keep last 10 turns to prevent token overflow
+# Memory management
+MAX_CONVERSATION_TURNS = 10
 conversation_store: Dict[str, ListMemory] = {}
 
 
-def get_or_create_conversation_memory(conversation_id: str) -> ListMemory:
+def get_conversation_memory(conversation_id: str) -> ListMemory:
     """
-    Get or create conversation memory with automatic cleanup
+    Get or create conversation memory
     
     Args:
         conversation_id: Unique conversation identifier
@@ -113,62 +119,44 @@ def get_or_create_conversation_memory(conversation_id: str) -> ListMemory:
         logger.info(f"Creating new conversation memory: {conversation_id}")
         conversation_store[conversation_id] = ListMemory()
     
-    memory = conversation_store[conversation_id]
-    
-    # Limit memory size to prevent token overflow
-    # Each turn = user message + assistant response = 2 messages
-    max_messages = MAX_CONVERSATION_TURNS * 2
-    
-    # Get current messages (this is a workaround since ListMemory doesn't expose count)
-    # We'll track this in a more robust way
-    
-    return memory
+    return conversation_store[conversation_id]
 
 
-def cleanup_old_conversations():
+def is_analytical_query(query: str) -> bool:
     """
-    Cleanup conversations older than 1 hour (optional background task)
-    This is a simple implementation - in production, use a proper TTL cache
-    """
-    # This would require timestamp tracking - simplified for now
-    # In production: use redis with TTL or implement proper cache eviction
-    pass
-
-
-async def validate_response(response: str, query: str) -> Dict[str, any]:
-    """
-    Validate AI response meets quality standards
+    Simple check if query requires analytical response
     
     Args:
-        response: AI generated response
-        query: Original user query
+        query: User's query text
     
     Returns:
-        Dictionary with validation results
+        True if query is analytical in nature
     """
-    validation = {
-        'has_order_numbers': 'Order' in response or '#' in response,
-        'has_units': any(unit in response for unit in ['FT', 'LB', 'EA', 'GAL']),
-        'has_no_data_claim': 'No records found' in response or 'no open orders' in response.lower(),
-        'is_too_short': len(response.split()) < 10,
-        'mentions_making_up_data': 'I cannot' in response or "I don't have" in response
-    }
+    analytical_keywords = [
+        'forecast', 'predict', 'trend', 'pattern', 'analyze',
+        'growth', 'decline', 'compare', 'revenue', 'performance',
+        'recommend', 'should i', 'next month', 'last quarter',
+        'how much', 'expect', 'projection'
+    ]
     
-    # Check if query asks for count
-    is_count_query = any(word in query.lower() for word in ['how many', 'count', 'number of'])
-    
-    if is_count_query:
-        validation['has_count'] = any(char.isdigit() for char in response)
-    
-    return validation
+    query_lower = query.lower()
+    return any(keyword in query_lower for keyword in analytical_keywords)
 
 
-async def handle_stateful_conversation(
+async def handle_message_conversation(
     model: AIModel, 
     ctx: ActivityContext[MessageActivity]
 ) -> None:
     """
-    Enhanced conversation handler with validation and error recovery
+    Main conversation handler with analytics support
+    
+    Flow:
+    1. Get conversation memory
+    2. Extract user query
+    3. Search database (with automatic RecordType filtering)
+    4. Generate analytics context (if analytical query)
+    5. Send to AI model
+    6. Return response
     
     Args:
         model: AI model instance
@@ -178,42 +166,67 @@ async def handle_stateful_conversation(
     logger.info(f"Processing message for conversation: {conversation_id}")
     
     try:
-        # Get conversation memory
-        memory = get_or_create_conversation_memory(conversation_id)
+        # Step 1: Get conversation memory
+        memory = get_conversation_memory(conversation_id)
         
-        # Extract user input
+        # Step 2: Extract user input
         input_text = ctx.activity.strip_mentions_text().text
         logger.info(f"User query: {input_text}")
         
-        # Send typing indicator for better UX
-        # await ctx.send_typing_indicator()  # If available in your SDK
+        # Check if this is analytical
+        is_analytical = is_analytical_query(input_text)
+        if is_analytical:
+            logger.info("Detected analytical query - will include analytics context")
         
-        # Step 1: Retrieve RAG data with error handling
+        # Step 3: Search database (RecordType filtering now happens automatically)
         try:
             data_context = await azure_ai_search.render_data(input_text)
-            logger.info(f"Search metadata: {data_context.metadata}")
+            logger.info(f"Search results: {data_context.metadata}")
         except Exception as e:
             logger.error(f"Search failed: {e}", exc_info=True)
             await ctx.send(
                 MessageActivityInput(
-                    text="I'm having trouble accessing the database right now. Please try again in a moment."
+                    text="I'm having trouble accessing the database right now. "
+                         "Please try again in a moment."
                 )
             )
             return
         
-        # Step 2: Build enhanced prompt
+        # Step 4: Build context for AI
         enhanced_instructions = INSTRUCTIONS + SYSTEM_ENHANCEMENT
         
-        # Add metadata context if available
+        # Add search metadata if available
         metadata_context = ""
         if hasattr(data_context, 'metadata') and data_context.metadata:
             meta = data_context.metadata
             if meta.get('unique_orders', 0) > 0:
-                metadata_context = f"\n\nSEARCH METADATA: Found {meta['unique_orders']} unique orders in {meta['unique_chunks']} records."
+                filter_info = ""
+                if meta.get('filter_applied'):
+                    filter_info = f" (Filtered by: {meta.get('record_type_filter')})"
+                
+                metadata_context = (
+                    f"\n\nSEARCH METADATA: Found {meta['unique_orders']} unique orders "
+                    f"in {meta['unique_chunks']} records{filter_info}."
+                )
         
-        full_context = f"{enhanced_instructions}\n\nAdditional Context from Search:{metadata_context}\n{data_context.output}"
+        # Step 5: Generate analytics context for analytical queries
+        analytics_context = ""
+        if is_analytical and data_context.output:
+            try:
+                analytics_context = create_analytics_context(data_context.output)
+                logger.info("Generated analytics context")
+            except Exception as e:
+                logger.error(f"Analytics generation failed: {e}")
         
-        # Step 3: Create chat prompt and send to AI
+        # Combine all context
+        full_context = (
+            f"{enhanced_instructions}"
+            f"{metadata_context}"
+            f"{analytics_context}"
+            f"\n\nSearch Results:\n{data_context.output}"
+        )
+        
+        # Step 6: Send to AI model
         chat_prompt = ChatPrompt(model)
         
         try:
@@ -226,69 +239,50 @@ async def handle_stateful_conversation(
             logger.error(f"Model completion failed: {e}", exc_info=True)
             await ctx.send(
                 MessageActivityInput(
-                    text="I encountered an error generating a response. Please rephrase your question."
+                    text="I encountered an error generating a response. "
+                         "Please rephrase your question."
                 )
             )
             return
         
-        # Step 4: Validate response
+        # Step 7: Send response
         response_text = chat_result.response.content
-        validation = await validate_response(response_text, input_text)
         
-        # Log validation results
-        logger.info(f"Response validation: {validation}")
-        
-        # Step 5: Send response with feedback
         await ctx.send(
             MessageActivityInput(text=response_text)
             .add_ai_generated()
             .add_feedback()
         )
         
-        logger.info(f"Response sent successfully for conversation: {conversation_id}")
+        logger.info(f"Response sent successfully for: {conversation_id}")
         
     except Exception as e:
-        logger.error(f"Unexpected error in conversation handler: {e}", exc_info=True)
-        
-        # Send generic error message
+        logger.error(f"Unexpected error: {e}", exc_info=True)
         await ctx.send(
             MessageActivityInput(
-                text="An unexpected error occurred. Our team has been notified. Please try again."
+                text="An unexpected error occurred. Please try again."
             )
         )
 
 
 @app.on_message
 async def handle_message(ctx: ActivityContext[MessageActivity]):
-    """
-    Main message handler
-    
-    Args:
-        ctx: Activity context
-    """
-    await handle_stateful_conversation(model, ctx)
+    """Main message handler"""
+    await handle_message_conversation(model, ctx)
 
 
 @app.on_message_submit_feedback
-async def handle_message_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity]):
-    """
-    Handle feedback submission events
-    
-    Args:
-        ctx: Activity context with feedback
-    """
+async def handle_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity]):
+    """Handle user feedback"""
     activity = ctx.activity
     feedback_value = activity.value.action_value
     
     logger.info(f"User feedback received: {feedback_value}")
     
-    # In production, store this in a database for analysis
+    # In production: store feedback for analysis and model improvement
     # Example: await store_feedback(conversation_id, message_id, feedback_value)
-    
-    # Optional: Send acknowledgment
-    # await ctx.send(MessageActivityInput(text="Thank you for your feedback!"))
 
 
 if __name__ == "__main__":
-    logger.info("Starting Goodyear AI Assistant...")
+    logger.info("Starting Goodyear AI Assistant with Analytics...")
     asyncio.run(app.start())
