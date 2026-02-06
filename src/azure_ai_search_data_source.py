@@ -1,6 +1,6 @@
 """
-Azure AI Search Data Source - Direct OData Filtering
-Now uses RecordType field for efficient server-side filtering
+Azure AI Search Data Source - Complete OData Filtering Implementation
+Fixed customer extraction to avoid false positives
 """
 
 from dataclasses import dataclass
@@ -10,7 +10,7 @@ from openai import AsyncAzureOpenAI
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 import logging
-from datetime import datetime
+import re
 
 from config import Config
 
@@ -23,17 +23,7 @@ MAX_CACHE_SIZE = 100
 
 
 async def get_embedding_vector(text: str, use_cache: bool = True) -> List[float]:
-    """
-    Generate embedding with caching and retry logic
-    
-    Args:
-        text: Input text to embed
-        use_cache: Whether to use cached embeddings
-    
-    Returns:
-        Embedding vector
-    """
-    # Check cache first
+    """Generate embedding with caching and retry logic"""
     cache_key = text.lower().strip()
     if use_cache and cache_key in _embedding_cache:
         logger.info(f"Using cached embedding for query: {text[:50]}...")
@@ -59,7 +49,6 @@ async def get_embedding_vector(text: str, use_cache: bool = True) -> List[float]
         
         # Cache the result (with size limit)
         if len(_embedding_cache) >= MAX_CACHE_SIZE:
-            # Remove oldest entry
             _embedding_cache.pop(next(iter(_embedding_cache)))
         _embedding_cache[cache_key] = embedding
         
@@ -77,8 +66,8 @@ class AzureAISearchDataSourceOptions:
     indexName: str
     azureAISearchApiKey: str
     azureAISearchEndpoint: str
-    top_k: int = 15  # Number of results to return
-    vector_k: int = 35  # Number of vector neighbors to consider
+    top_k: int = 15
+    vector_k: int = 35
 
 
 @dataclass
@@ -89,11 +78,29 @@ class Result:
         self.metadata = metadata or {}
 
 
+class QueryIntent:
+    """Simple class to hold query analysis results"""
+    def __init__(self):
+        self.record_type = None  # 'OpenOrder', 'History', or 'ShipmentLine'
+        self.customer_code = None  # Customer identifier if mentioned
+        self.customer_name = None  # Customer name if mentioned
+        self.order_number = None  # Specific order number if mentioned
+        self.is_count_query = False  # True if asking "how many"
+        self.is_detail_request = False  # True if asking for details of specific order
+        self.search_text = ""  # Processed search text
+    
+    def __str__(self):
+        return (
+            f"QueryIntent(record_type={self.record_type}, "
+            f"customer={self.customer_name or self.customer_code}, "
+            f"order={self.order_number}, "
+            f"is_count={self.is_count_query}, "
+            f"is_detail={self.is_detail_request})"
+        )
+
+
 class AzureAISearchDataSource:
-    """
-    Improved data source with direct OData filtering on RecordType
-    Now that RecordType is filterable, we can use server-side filtering
-    """
+    """Azure AI Search data source with proper OData filtering"""
     
     def __init__(self, options: AzureAISearchDataSourceOptions):
         self.name = options.name
@@ -104,136 +111,362 @@ class AzureAISearchDataSource:
             AzureKeyCredential(options.azureAISearchApiKey)
         )
         logger.info(f"Initialized search client for index: {options.indexName}")
-        
-    def _detect_query_intent(self, query: str) -> Dict[str, Any]:
+    
+    def _extract_order_number(self, query: str) -> Optional[str]:
         """
-        Analyze user query to determine search intent and required RecordType
+        Extract order number from query
         
         Args:
             query: User's search query
         
         Returns:
-            Dictionary with intent information including RecordType filter
+            Order number if found, None otherwise
+        
+        Examples:
+            "Give me details on order number 90143" → "90143"
+            "Show me order 12345" → "12345"
+            "Details for order 99999" → "99999"
+            "Order #12345" → "12345"
+        """
+        # Pattern 1: "order number X" or "order # X"
+        match = re.search(r'\border\s*(?:number|#|no\.?|num\.?)?\s*([0-9]+)', query, re.IGNORECASE)
+        if match:
+            order_no = match.group(1)
+            logger.info(f"Extracted order number: {order_no}")
+            return order_no
+        
+        # Pattern 2: Just a number after certain keywords
+        match = re.search(r'\b(?:details?|info|information|status)\s+(?:on|for|of)?\s*#?\s*([0-9]{5,})', query, re.IGNORECASE)
+        if match:
+            order_no = match.group(1)
+            logger.info(f"Extracted order number from detail request: {order_no}")
+            return order_no
+        
+        # Pattern 3: Direct number reference (5+ digits)
+        match = re.search(r'\b([0-9]{5,})\b', query)
+        if match:
+            order_no = match.group(1)
+            logger.info(f"Extracted standalone order number: {order_no}")
+            return order_no
+        
+        return None
+    
+    def _is_detail_request(self, query: str) -> bool:
+        """
+        Detect if user is asking for details of a specific order
+        
+        Args:
+            query: User's search query
+        
+        Returns:
+            True if this is a detail request
+        
+        Examples:
+            "Give me details on order 90143" → True
+            "Show me details for order 12345" → True
+            "Details of order 99999" → True
+            "What orders do I have?" → False
         """
         query_lower = query.lower()
         
-        intent = {
-            "record_type_filter": None,  # OData filter string
-            "is_status_check": False,
-            "is_count_query": False,
-            "query_focus": "general"
-        }
-        
-        # Keywords that indicate OpenOrder (backlog/pending)
-        open_order_keywords = [
-            "open", "backorder", "pending", "backlog", 
-            "on-going", "awaiting", "unfulfilled", "outstanding",
-            "back order", "open order", "backlogs", "backorders",
-            "back orders", "open orders", "back log", "back logs",
-            "openorder", "openorders"
+        detail_keywords = [
+            'detail', 'details', 'breakdown', 'break down', 'information',
+            'info', 'status', 'show me order', 'give me order', 'get order'
         ]
         
-        # Keywords that indicate ShipmentLine (tracking/delivery)
-        shipment_keywords = [
-            "ship", "track", "deliver", "shipment", "delivery", "shipments" 
-            "shipped", "fulfillment", "sent", "dispatched", "shipping"
-        ]
+        # Check if query contains detail keywords AND an order number
+        has_detail_keyword = any(keyword in query_lower for keyword in detail_keywords)
+        has_order_number = self._extract_order_number(query) is not None
         
-        # Keywords that indicate History (past/completed)
-        history_keywords = [
-            "history", "past", "previous", "last", "closed", 
-            "historical", "old", "completed", "invoiced"
-        ]
-        
-        # Determine RecordType filter based on keywords
-        # Priority: OpenOrder > ShipmentLine > History (most common use cases first)
-        if any(keyword in query_lower for keyword in open_order_keywords):
-            intent["record_type_filter"] = "RecordType eq 'OpenOrder'"
-            intent["is_status_check"] = True
-            intent["query_focus"] = "open_orders"
-            logger.info("Detected OpenOrder intent - will filter for pending orders")
-            
-        elif any(keyword in query_lower for keyword in shipment_keywords):
-            intent["record_type_filter"] = "RecordType eq 'ShipmentLine'"
-            intent["query_focus"] = "shipments"
-            logger.info("Detected ShipmentLine intent - will filter for shipments")
-            
-        elif any(keyword in query_lower for keyword in history_keywords):
-            intent["record_type_filter"] = "RecordType eq 'History'"
-            intent["query_focus"] = "historical"
-            logger.info("Detected History intent - will filter for completed orders")
-        
-        # Detect count queries
-        if any(word in query_lower for word in ["how many", "count", "number of", "total"]):
-            intent["is_count_query"] = True
-        
-        return intent
-
-    def _build_odata_filter(self, intent: Dict[str, Any]) -> Optional[str]:
+        return has_detail_keyword and has_order_number
+    
+    def _extract_customer_info(self, query: str) -> tuple[Optional[str], Optional[str]]:
         """
-        Build OData filter string based on detected intent
+        Extract customer code or name from query
         
-        Args:
-            intent: Intent dictionary from _detect_query_intent
-        
-        Returns:
-            OData filter string or None for no filtering
-        """
-        # If we detected a specific RecordType, use it
-        if intent.get("record_type_filter"):
-            return intent["record_type_filter"]
-        
-        # No filter means search all record types
-        return None
-
-    async def render_data(self, query: str) -> Result:
-        """
-        Enhanced data retrieval with direct OData filtering on RecordType
+        IMPORTANT: This should NOT extract if the query is about:
+        - Specific order numbers (e.g., "details on order 90143")
+        - Count queries (e.g., "how many orders")
+        - Detail requests (e.g., "show me details for...")
         
         Args:
             query: User's search query
         
         Returns:
-            Result object with formatted search results and metadata
+            Tuple of (customer_code, customer_name)
+        
+        Examples:
+            "orders for ASEPCO" → (None, "ASEPCO")
+            "orders for BALDWI" → (None, "BALDWI")
+            "ACME orders" → (None, "ACME")
+            "Give me details on order 90143" → (None, None)  # NOT a customer!
         """
+        query_lower = query.lower()
+        
+        # SAFETY CHECK 1: Don't extract if asking about order number
+        if self._extract_order_number(query) is not None:
+            logger.info("Query is about order number, not customer - skipping customer extraction")
+            return None, None
+        
+        # SAFETY CHECK 2: Don't extract if asking for details/breakdown
+        if self._is_detail_request(query):
+            logger.info("Query is detail request - skipping customer extraction")
+            return None, None
+        
+        # SAFETY CHECK 3: Don't extract if it's a count query
+        if self._is_count_query(query):
+            logger.info("Query is count query - customer extraction will be more careful")
+            # For count queries, we still want customer but be more strict
+        
+        # Blocklist of words that should NEVER be considered customer names
+        blocklist_words = [
+            'detail', 'details', 'information', 'info', 'breakdown', 'break', 'down',
+            'show', 'give', 'get', 'find', 'search', 'list', 'display',
+            'order', 'orders', 'shipment', 'shipments', 'history',
+            'open', 'closed', 'pending', 'backlog', 'outstanding',
+            'my', 'our', 'the', 'all', 'any', 'some',
+            'status', 'number', 'data', 'record', 'records'
+        ]
+        
+        # Pattern 1: "for [customer name]" - most reliable pattern
+        match = re.search(
+            r'\bfor\s+([A-Z][A-Za-z0-9\s&.-]+?)(?:\?|$|\s+(?:customer|corp|company|inc|ltd)?)', 
+            query, 
+            re.IGNORECASE
+        )
+        if match:
+            customer_name = match.group(1).strip()
+            # Remove trailing keywords
+            customer_name = re.sub(r'\s+(customer|corp|company|inc|ltd)$', '', customer_name, flags=re.IGNORECASE).strip()
+            
+            # Safety check: make sure it's not a blocklisted word
+            if customer_name.lower() not in blocklist_words:
+                logger.info(f"Extracted customer name: {customer_name}")
+                return None, customer_name
+            else:
+                logger.info(f"Rejected '{customer_name}' - matched blocklist")
+                return None, None
+        
+        # Pattern 2: "[customer name] orders/shipments" - but be careful
+        match = re.search(
+            r'^([A-Z][A-Za-z0-9\s&.-]+?)\s+(?:orders?|shipments?)', 
+            query, 
+            re.IGNORECASE
+        )
+        if match:
+            potential_name = match.group(1).strip()
+            
+            # Check against blocklist
+            if potential_name.lower() not in blocklist_words:
+                logger.info(f"Extracted customer name from prefix: {potential_name}")
+                return None, potential_name
+            else:
+                logger.info(f"Rejected '{potential_name}' - matched blocklist")
+                return None, None
+        
+        # Pattern 3: "customer [code]" - explicit customer code
+        match = re.search(r'customer\s+([A-Z0-9-]+)', query, re.IGNORECASE)
+        if match:
+            customer_code = match.group(1).strip()
+            logger.info(f"Extracted customer code: {customer_code}")
+            return customer_code, None
+        
+        return None, None
+    
+    def _detect_record_type(self, query: str) -> Optional[str]:
+        """Detect RecordType based on keywords"""
+        query_lower = query.lower()
+        
+        open_keywords = [
+            'open', 'pending', 'backorder', 'backlog', 'outstanding',
+            'awaiting', 'unfulfilled', 'current', 'active'
+        ]
+        history_keywords = [
+            'closed', 'completed', 'finished', 'historical', 'history',
+            'past', 'previous', 'old', 'archived', 'invoiced'
+        ]
+        shipment_keywords = [
+            'ship', 'shipped', 'shipment', 'shipments', 'deliver', 'delivery',
+            'track', 'tracking', 'sent', 'dispatched'
+        ]
+        
+        if any(keyword in query_lower for keyword in open_keywords):
+            logger.info("Detected OpenOrder intent")
+            return 'OpenOrder'
+        if any(keyword in query_lower for keyword in shipment_keywords):
+            logger.info("Detected ShipmentLine intent")
+            return 'ShipmentLine'
+        if any(keyword in query_lower for keyword in history_keywords):
+            logger.info("Detected History intent")
+            return 'History'
+        
+        logger.info("No specific RecordType detected - will search all types")
+        return None
+    
+    def _is_count_query(self, query: str) -> bool:
+        """Detect if user is asking for a count"""
+        query_lower = query.lower()
+        count_keywords = [
+            'how many', 'count', 'number of', 'total', 'quantity of',
+            'how much', 'sum of'
+        ]
+        return any(keyword in query_lower for keyword in count_keywords)
+    
+    def _analyze_query(self, query: str) -> QueryIntent:
+        """
+        Analyze user query to determine intent
+        
+        This is the main intelligence function that figures out:
+        1. Is this about a specific order number?
+        2. Is this a detail request?
+        3. What RecordType to filter for?
+        4. Which customer (if any)?
+        5. Is it a count query?
+        """
+        intent = QueryIntent()
+        
+        # IMPORTANT: Check order number FIRST (highest priority)
+        intent.order_number = self._extract_order_number(query)
+        intent.is_detail_request = self._is_detail_request(query)
+        
+        # Then check other intents
+        intent.is_count_query = self._is_count_query(query)
+        intent.record_type = self._detect_record_type(query)
+        
+        # Extract customer ONLY if not an order number query
+        if intent.order_number is None:
+            intent.customer_code, intent.customer_name = self._extract_customer_info(query)
+        else:
+            logger.info("Query is about specific order number - not extracting customer")
+        
+        # Clean search text
+        search_text = query
+        for keyword in ['how many', 'count of', 'number of', 'total', 'details', 'detail']:
+            search_text = re.sub(keyword, '', search_text, flags=re.IGNORECASE)
+        intent.search_text = search_text.strip()
+        
+        logger.info(f"Query analysis: {intent}")
+        return intent
+    
+    def _build_odata_filter(self, intent: QueryIntent) -> Optional[str]:
+        """
+        Build OData filter string from intent
+        
+        Priority order:
+        1. Order number (if present)
+        2. RecordType + Customer (if present)
+        3. RecordType only
+        4. Customer only
+        5. No filter
+        """
+        filters = []
+        
+        # Priority 1: If specific order number, filter by that
+        if intent.order_number:
+            logger.info(f"Building filter for order number: {intent.order_number}")
+            # Search for order number in ORDER_NO field
+            # This will match 90143-01, 90143-02, etc.
+            filters.append(f"search.ismatch('{intent.order_number}', 'ORDER_NO')")
+            return ' and '.join(filters)  # Return early, order number is most specific
+        
+        # Priority 2: RecordType filter
+        if intent.record_type:
+            filters.append(f"RecordType eq '{intent.record_type}'")
+        
+        # Priority 3: Customer filter
+        customer_val = intent.customer_name or intent.customer_code
+        if customer_val:
+            safe_val = customer_val.replace("'", "''")
+            logger.info(f"Using dual-field customer filter for: {safe_val}")
+            
+            # Check BOTH Name and Code fields
+            customer_filter = (
+                f"("
+                f"search.ismatch('{safe_val}', 'NAME_CUSTOMER') or "
+                f"search.ismatch('{safe_val}', 'CUSTOMER')"
+                f")"
+            )
+            filters.append(customer_filter)
+        
+        if filters:
+            odata_filter = ' and '.join(filters)
+            logger.info(f"Built OData filter: {odata_filter}")
+            return odata_filter
+        
+        return None
+    
+    async def _execute_count_query(self, query: str, odata_filter: Optional[str]) -> int:
+        """Execute a count-only query"""
+        try:
+            search_params = {
+                'search_text': query,
+                'filter': odata_filter,
+                'include_total_count': True,
+                'top': 0
+            }
+            search_params = {k: v for k, v in search_params.items() if v is not None}
+            
+            logger.info(f"Executing count query with filter: {odata_filter}")
+            results = self.searchClient.search(**search_params)
+            count = results.get_count()
+            
+            logger.info(f"Count query returned: {count} results")
+            return count if count is not None else 0
+        except Exception as e:
+            logger.error(f"Count query failed: {e}", exc_info=True)
+            return 0
+    
+    async def render_data(self, query: str) -> Result:
+        """Main search function with proper OData filtering"""
         if not query or not query.strip():
             logger.warning("Empty query received")
             return Result('', {'warning': 'Empty query'})
         
         try:
             # Step 1: Analyze query intent
-            intent = self._detect_query_intent(query)
-            logger.info(f"Query intent: {intent}")
+            intent = self._analyze_query(query)
             
-            # Step 2: Generate embedding for vector search
-            embedding = await get_embedding_vector(query)
+            # Step 2: Build OData filter
+            odata_filter = self._build_odata_filter(intent)
             
-            # Step 3: Setup vector query
+            # Step 3: Handle count queries specially (fast path)
+            if intent.is_count_query:
+                count = await self._execute_count_query(query, odata_filter)
+                
+                record_type_text = intent.record_type or "records"
+                customer_text = f" for {intent.customer_name or intent.customer_code}" if (intent.customer_name or intent.customer_code) else ""
+                
+                response_text = f"COUNT RESULT: Found {count} {record_type_text}{customer_text}."
+                
+                metadata = {
+                    'is_count_query': True,
+                    'total_count': count,
+                    'record_type': intent.record_type,
+                    'customer': intent.customer_name or intent.customer_code,
+                    'filter_applied': odata_filter
+                }
+                
+                return Result(response_text, metadata)
+            
+            # Step 4: Generate embedding for regular search
+            embedding = await get_embedding_vector(intent.search_text or query)
+            
+            # Step 5: Setup vector query
             vector_query = VectorizedQuery(
-                vector=embedding, 
+                vector=embedding,
                 k_nearest_neighbors=self.options.vector_k,
                 fields="text_vector"
             )
-
-            # Step 4: Select fields to retrieve
-            selected_fields = [
-                'chunk',           # Main content
-                'chunk_id',        # Unique identifier
-                'RecordType',      # Record type (now filterable!)
-                'ORDER_NO',        # Order number
-                'NAME_CUSTOMER',   # Customer name
-                'CUSTOMER',        # Customer code
-                'DATE_SHIPPED',    # For history
-                'PROM_DT',         # For open orders
-                'SL_DATE_SHIP'     # For shipments
-            ]
-
-            # Step 5: Build OData filter
-            odata_filter = self._build_odata_filter(intent)
             
-            # Step 6: Execute search with OData filter
+            # Step 6: Select fields to retrieve
+            selected_fields = [
+                'chunk', 'chunk_id', 'RecordType', 'ORDER_NO', 
+                'NAME_CUSTOMER', 'CUSTOMER', 'DATE_SHIPPED', 'PROM_DT', 'SL_DATE_SHIP'
+            ]
+            
+            # Step 7: Build search parameters
             search_params = {
-                'search_text': query,
+                'search_text': intent.search_text or query,
                 'select': selected_fields,
                 'vector_queries': [vector_query],
                 'top': self.options.top_k,
@@ -241,66 +474,73 @@ class AzureAISearchDataSource:
                 'semantic_configuration_name': "rag-1767122801281-semantic-configuration"
             }
             
-            # Add filter if we have one
+            # Add OData filter if we have one
             if odata_filter:
                 search_params['filter'] = odata_filter
                 logger.info(f"Applying OData filter: {odata_filter}")
             else:
-                logger.info("No filter applied - searching all RecordTypes")
+                logger.info("No OData filter - searching all RecordTypes")
             
-            # Execute search
+            search_params['include_total_count'] = True
+            
+            logger.info(f"Executing search with params: top={self.options.top_k}")
+            
+            # Step 8: Execute search
             searchResults = self.searchClient.search(**search_params)
-
-            # Step 7: Process and group results
+            
+            # Step 9: Process results
             all_results = list(searchResults)
             result_count = len(all_results)
+            total_count = searchResults.get_count() or result_count
             
-            logger.info(f"Retrieved {result_count} results from search")
+            logger.info(f"Retrieved {result_count} results (total matching: {total_count})")
             
-            # Deduplication and grouping
+            # Step 10: Group by base order number
             docs = []
             seen_chunks = set()
             order_groups = {}
             
             for result in all_results:
-                # Get chunk content
                 content = result.get('chunk', 'N/A')
                 
-                # Skip duplicates
                 if content in seen_chunks:
                     continue
                 seen_chunks.add(content)
                 
-                # Extract metadata
                 record_type = result.get('RecordType', 'Unknown')
                 cust_name = result.get('NAME_CUSTOMER', 'Unknown')
                 cust_id = result.get('CUSTOMER', 'N/A')
                 order_no = result.get('ORDER_NO', 'N/A')
                 
-                # Group by order number
-                if order_no not in order_groups:
-                    order_groups[order_no] = []
+                # Extract base order number (everything before the dash)
+                base_order_no = str(order_no).split('-')[0].strip()
+                
+                if base_order_no not in order_groups:
+                    order_groups[base_order_no] = []
                 
                 chunk_data = {
                     'record_type': record_type,
                     'customer_name': cust_name,
                     'customer_id': cust_id,
-                    'order_no': order_no,
+                    'order_no': order_no,  # Keep full number for display
+                    'base_order_no': base_order_no,
                     'content': content
                 }
-                order_groups[order_no].append(chunk_data)
+                order_groups[base_order_no].append(chunk_data)
             
-            # Step 8: Format grouped results
-            for order_no, chunks in order_groups.items():
-                # Add order header for multi-item orders
+            # Step 11: Format results
+            for base_order, chunks in order_groups.items():
+                first_chunk = chunks[0]
+                
+                # Add header showing base order number
                 if len(chunks) > 1:
-                    first_chunk = chunks[0]
                     docs.append(
-                        f"=== ORDER {order_no} ({first_chunk['record_type']}) | "
-                        f"{first_chunk['customer_name']} ({first_chunk['customer_id']}) ==="
+                        f"=== ORDER {base_order} ({first_chunk['record_type']}) | "
+                        f"{first_chunk['customer_name']} | "
+                        f"{len(chunks)} line items ==="
                     )
                 
-                # Add individual chunks
+                # Add individual line items
                 for chunk in chunks:
                     header = (
                         f"{chunk['record_type']} | "
@@ -309,38 +549,57 @@ class AzureAISearchDataSource:
                     )
                     docs.append(f"Source: {header}\nContent: {chunk['content']}")
             
-            # Step 9: Create metadata
+            # Step 12: Create metadata
             metadata = {
                 'total_results': result_count,
+                'total_matching': total_count,
                 'unique_chunks': len(seen_chunks),
-                'unique_orders': len(order_groups),
-                'intent': intent,
-                'filter_applied': odata_filter is not None,
-                'record_type_filter': odata_filter
+                'unique_orders': len(order_groups),  # Count of unique base orders
+                'record_type': intent.record_type,
+                'customer': intent.customer_name or intent.customer_code,
+                'order_number': intent.order_number,
+                'is_detail_request': intent.is_detail_request,
+                'filter_applied': odata_filter,
+                'is_count_query': False
             }
             
             # Handle no results
             if not docs:
                 logger.warning(f"No results found for query: {query}")
-                return Result(
-                    "No relevant records found in the database.",
-                    metadata
-                )
+                no_results_msg = "No relevant records found"
+                
+                if intent.order_number:
+                    no_results_msg += f" for order {intent.order_number}"
+                elif intent.record_type:
+                    no_results_msg += f" for {intent.record_type}"
+                if intent.customer_name or intent.customer_code:
+                    no_results_msg += f" for customer {intent.customer_name or intent.customer_code}"
+                
+                return Result(no_results_msg + ".", metadata)
             
-            # Step 10: Format output
+            # Step 13: Format output with summary
             formatted_output = '\n\n---\n\n'.join(docs)
             
-            # Add summary for count queries
-            if intent['is_count_query']:
-                summary = (
-                    f"SEARCH SUMMARY: Found {len(order_groups)} unique orders "
-                    f"across {len(seen_chunks)} records.\n\n"
-                )
-                formatted_output = summary + formatted_output
+            # Build summary
+            summary = f"SEARCH SUMMARY: Found {len(order_groups)} unique orders across {len(seen_chunks)} records"
+            
+            if total_count > result_count:
+                summary += f" (showing top {result_count} of {total_count} total matches)"
+            
+            if intent.order_number:
+                summary += f" | Order: {intent.order_number}"
+            elif intent.record_type:
+                summary += f" | Filtered by: {intent.record_type}"
+            
+            if intent.customer_name or intent.customer_code:
+                summary += f" | Customer: {intent.customer_name or intent.customer_code}"
+            
+            formatted_output = summary + ".\n\n" + formatted_output
             
             logger.info(
                 f"Successfully processed query - "
-                f"Orders: {len(order_groups)}, Chunks: {len(seen_chunks)}"
+                f"Orders: {len(order_groups)}, Chunks: {len(seen_chunks)}, "
+                f"Total matching: {total_count}"
             )
             
             return Result(formatted_output, metadata)
