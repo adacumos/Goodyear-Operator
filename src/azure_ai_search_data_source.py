@@ -465,11 +465,17 @@ class AzureAISearchDataSource:
             ]
             
             # Step 7: Build search parameters
+            # ADAPTIVE LIMIT: Increase top_k if we have a specific filter (High Recall Mode)
+            current_top_k = self.options.top_k
+            if odata_filter and not intent.order_number:
+                current_top_k = 380 # Increase limit for broad customer/type queries
+                logger.info(f"High Recall Mode: Increased top_k to {current_top_k} due to filter")
+
             search_params = {
                 'search_text': intent.search_text or query,
                 'select': selected_fields,
                 'vector_queries': [vector_query],
-                'top': self.options.top_k,
+                'top': current_top_k,
                 'query_type': QueryType.SEMANTIC,
                 'semantic_configuration_name': "rag-1767122801281-semantic-configuration"
             }
@@ -483,7 +489,7 @@ class AzureAISearchDataSource:
             
             search_params['include_total_count'] = True
             
-            logger.info(f"Executing search with params: top={self.options.top_k}")
+            logger.info(f"Executing search with params: top={current_top_k}")
             
             # Step 8: Execute search
             searchResults = self.searchClient.search(**search_params)
@@ -522,7 +528,7 @@ class AzureAISearchDataSource:
                     'record_type': record_type,
                     'customer_name': cust_name,
                     'customer_id': cust_id,
-                    'order_no': order_no,  # Keep full number for display
+                    'order_no': order_no,
                     'base_order_no': base_order_no,
                     'content': content
                 }
