@@ -5,6 +5,7 @@ Simplified version with clearer logic flow
 
 import asyncio
 import os
+import re
 import logging
 from typing import Dict
 
@@ -18,6 +19,7 @@ from config import Config
 from azure_ai_search_data_source import AzureAISearchDataSource, AzureAISearchDataSourceOptions
 from custom_ai_model import create_model_from_config
 from analytics_helper import create_analytics_context
+from ups_service import UPSService
 
 # Configure logging
 logging.basicConfig(
@@ -27,6 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 config = Config()
+ups_service = UPSService(config)
 
 # Create Azure AI Search with optimized parameters
 search_options = AzureAISearchDataSourceOptions(
@@ -177,20 +180,61 @@ async def handle_message_conversation(
         is_analytical = is_analytical_query(input_text)
         if is_analytical:
             logger.info("Detected analytical query - will include analytics context")
+            
+        # Step 3: Routing Logic (Direct Tracking vs. Search)
+        tracking_context = ""
+        # Regex for UPS 1Z tracking number (1Z + 16 chars)
+        tracking_matches = re.findall(r'\b(1Z[A-Z0-9]{16})\b', input_text, re.IGNORECASE)
         
-        # Step 3: Search database (RecordType filtering now happens automatically)
-        try:
-            data_context = await azure_ai_search.render_data(input_text)
-            logger.info(f"Search results: {data_context.metadata}")
-        except Exception as e:
-            logger.error(f"Search failed: {e}", exc_info=True)
-            await ctx.send(
-                MessageActivityInput(
-                    text="I'm having trouble accessing the database right now. "
-                         "Please try again in a moment."
+        data_context = None 
+        
+        if tracking_matches:
+            # DIRECT TRACKING MODE
+            logger.info(f"Direct tracking detected: {tracking_matches} - SKIPPING SEARCH")
+            tracking_results = []
+            for number in tracking_matches:
+                res = ups_service.track_package(number)
+                tracking_results.append(f"Tracking Info for {number}: {res}")
+            
+            if tracking_results:
+                tracking_context = "\n\nUPS TRACKING RESULTS:\n" + "\n".join(tracking_results)
+                
+            # Create a dummy data_context for compatibility
+            class DummyDataContext:
+                output = "skipped (direct tracking)"
+                metadata = {}
+            data_context = DummyDataContext()
+            
+        else:
+            # STANDARD SEARCH MODE
+            try:
+                data_context = await azure_ai_search.render_data(input_text)
+                logger.info(f"Search results: {data_context.metadata}")
+                
+                # Check search results for tracking numbers (Indirect Tracking)
+                if data_context.output:
+                    found_matches = re.findall(r'\b(1Z[A-Z0-9]{16})\b', data_context.output, re.IGNORECASE)
+                    if found_matches:
+                        unique_matches = list(set(found_matches)) # Deduplicate
+                        logger.info(f"Found tracking numbers in search results: {unique_matches}")
+                        
+                        tracking_results = []
+                        for number in unique_matches:
+                            res = ups_service.track_package(number)
+                            tracking_results.append(f"Tracking Info for {number}: {res}")
+                            
+                        if tracking_results:
+                            tracking_context = "\n\nUPS TRACKING RESULTS (Auto-detected from search):\n" + "\n".join(tracking_results)
+                
+            except Exception as e:
+                logger.error(f"Search failed: {e}", exc_info=True)
+                await ctx.send(
+                    MessageActivityInput(
+                        text="I'm having trouble accessing the database right now. "
+                             "Please try again in a moment."
+                    )
                 )
-            )
-            return
+                return
         
         # Step 4: Build context for AI
         enhanced_instructions = INSTRUCTIONS + SYSTEM_ENHANCEMENT
@@ -211,7 +255,8 @@ async def handle_message_conversation(
         
         # Step 5: Generate analytics context for analytical queries
         analytics_context = ""
-        if is_analytical and data_context.output:
+        # Only generating analytics if we actually searched and have data
+        if not tracking_matches and is_analytical and data_context.output:
             try:
                 analytics_context = create_analytics_context(data_context.output)
                 logger.info("Generated analytics context")
@@ -223,6 +268,7 @@ async def handle_message_conversation(
             f"{enhanced_instructions}"
             f"{metadata_context}"
             f"{analytics_context}"
+            f"{tracking_context}"
             f"\n\nSearch Results:\n{data_context.output}"
         )
         
@@ -281,6 +327,9 @@ async def handle_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity
     
     # In production: store feedback for analysis and model improvement
     # Example: await store_feedback(conversation_id, message_id, feedback_value)
+
+
+
 
 
 if __name__ == "__main__":

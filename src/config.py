@@ -16,6 +16,11 @@ class Config:
     APP_ID = os.environ.get("CLIENT_ID", "")
     APP_PASSWORD = os.environ.get("CLIENT_SECRET", "")
     APP_TYPE = os.environ.get("BOT_TYPE", "")
+    
+    # UPS Configuration
+    UPS_CLIENT_ID = os.environ.get("UPS_CLIENT_ID", "")
+    UPS_CLIENT_SECRET = os.environ.get("UPS_CLIENT_SECRET", "")
+    UPS_ENVIRONMENT = os.environ.get("UPS_ENVIRONMENT", "test")  # test (CIE) or production
     APP_TENANTID = os.environ.get("TENANT_ID", "")
     AZURE_OPENAI_API_KEY = os.environ["AZURE_OPENAI_API_KEY"] # Azure OpenAI API key
     AZURE_OPENAI_MODEL_DEPLOYMENT_NAME = os.environ["AZURE_OPENAI_MODEL_DEPLOYMENT_NAME"] # Azure OpenAI model deployment name
